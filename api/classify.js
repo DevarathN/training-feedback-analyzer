@@ -38,25 +38,72 @@ Rules:
 Comments:
 ${JSON.stringify(batch.map((comment, index) => ({ id: index + 1, comment })))}`;
 
-      const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey
-        },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, responseMimeType: "application/json" }
-        })
-      });
+      
+      let upstream;
+      let data = {};
+      let lastError = "Gemini is temporarily unavailable.";
+      const delays = [1000, 2000, 4000];
 
-      const data = await upstream.json().catch(() => ({}));
-      if (!upstream.ok) {
-        const detail = data?.error?.message || `Gemini API returned status ${upstream.status}.`;
-        return res.status(upstream.status === 429 ? 429 : 502).json({ error: detail });
+      for (let attempt = 0; attempt < delays.length; attempt++) {
+        try {
+          upstream = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey
+              },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    role: "user",
+                    parts: [{ text: prompt }]
+                  }
+                ],
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: "application/json"
+                }
+              })
+            }
+          );
+
+          data = await upstream.json().catch(() => ({}));
+
+          if (upstream.ok) break;
+
+          lastError =
+            data?.error?.message ||
+            `Gemini API returned status ${upstream.status}.`;
+
+          // Retry temporary overload, server, or rate-limit errors.
+          if (![429, 500, 502, 503, 504].includes(upstream.status)) {
+            return res.status(502).json({ error: lastError });
+          }
+        } catch (error) {
+          upstream = undefined;
+          lastError = "Could not connect to Gemini. Please try again.";
+        }
+
+        if (attempt < delays.length - 1) {
+          await new Promise(resolve =>
+            setTimeout(resolve, delays[attempt])
+          );
+        }
       }
 
-      const responseText = data?.candidates?.[0]?.content?.parts?.map(part => part.text || "").join("") || "";
+      if (!upstream?.ok) {
+        return res.status(502).json({
+          error: `Gemini remained unavailable after retries. ${lastError}`
+        });
+      }
+
+      const responseText =
+        data?.candidates?.[0]?.content?.parts
+          ?.map(part => part.text || "")
+          .join("") || "";
+
       let parsed;
       try {
         parsed = JSON.parse(responseText);
